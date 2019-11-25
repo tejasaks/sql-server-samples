@@ -46,23 +46,22 @@ RETRY_INTERVAL=5
 #
 export DOCKER_REGISTRY="mcr.microsoft.com"
 export DOCKER_REPOSITORY="mssql/bdc"
-export DOCKER_TAG="2019-CTP3.2-ubuntu"
+export DOCKER_TAG="2019-GDR1-ubuntu-16.04"
 
 # Variables used for azdata cluster creation.
 #
-export CONTROLLER_USERNAME=admin
-export CONTROLLER_PASSWORD=$password
-export MSSQL_SA_PASSWORD=$password
-export KNOX_PASSWORD=$password
+export AZDATA_USERNAME=admin
+export AZDATA_PASSWORD=$password
 export ACCEPT_EULA=yes
 export CLUSTER_NAME=mssql-cluster
 export STORAGE_CLASS=local-storage
 export PV_COUNT="30"
 
 IMAGES=(
-        mssql-app-service-proxy
-        mssql-appdeploy-init
+	mssql-app-service-proxy
+        mssql-control-watchdog
         mssql-controller
+        mssql-dns
         mssql-hadoop
         mssql-mleap-serving-runtime
         mssql-mlserver-py-runtime
@@ -74,10 +73,14 @@ IMAGES=(
         mssql-monitor-influxdb
         mssql-monitor-kibana
         mssql-monitor-telegraf
+        mssql-security-domainctl
         mssql-security-knox
         mssql-security-support
+        mssql-server
         mssql-server-controller
         mssql-server-data
+        mssql-ha-operator
+	mssql-ha-supervisor
         mssql-service-proxy
         mssql-ssis-app-runtime
 )
@@ -121,6 +124,9 @@ usermod --append --groups docker $USER
 #
 apt-get install -q -y python3 
 apt-get install -q -y python3-pip
+apt-get install -y libkrb5-dev
+apt-get install -y libsqlite3-dev
+apt-get install -y unixodbc-dev
 
 pip3 install requests --upgrade
 
@@ -313,11 +319,11 @@ azdata bdc config init --source kubeadm-dev-test  --target kubeadm-custom -f
 azdata bdc config replace -c kubeadm-custom/control.json -j ".spec.docker.repository=$DOCKER_REPOSITORY"
 azdata bdc config replace -c kubeadm-custom/control.json -j ".spec.docker.registry=$DOCKER_REGISTRY"
 azdata bdc config replace -c kubeadm-custom/control.json -j ".spec.docker.imageTag=$DOCKER_TAG"
-azdata bdc config replace -c kubeadm-custom/cluster.json -j "$.spec.pools[?(@.spec.type == "Data")].spec.replicas=1"
+azdata bdc config replace -c kubeadm-custom/bdc.json -j "$.spec.resources.data-0.spec.replicas=1"
 azdata bdc config replace -c kubeadm-custom/control.json -j "spec.storage.data.className=$STORAGE_CLASS"
 azdata bdc config replace -c kubeadm-custom/control.json -j "spec.storage.logs.className=$STORAGE_CLASS"
 azdata bdc create -c kubeadm-custom --accept-eula $ACCEPT_EULA
-echo "Azdata cluster created." 
+echo "Big data cluster created." 
 
 # Setting context to cluster.
 #
