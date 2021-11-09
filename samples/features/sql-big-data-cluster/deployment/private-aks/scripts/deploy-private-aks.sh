@@ -19,6 +19,7 @@ export SUBID=$subscription
 
 export REGION_NAME=$region
 export RESOURCE_GROUP=$resourcegroup
+export KUBERNETES_VERSION=$version
 export SUBNET_NAME=aks-subnet
 export VNET_NAME=bdc-vnet
 export AKS_NAME=bdcaksprivatecluster
@@ -50,6 +51,7 @@ az aks create \
     --name $AKS_NAME \
     --load-balancer-sku standard \
     --enable-private-cluster \
+    --kubernetes-version $version \
     --network-plugin azure \
     --vnet-subnet-id $SUBNET_ID \
     --docker-bridge-address 172.17.0.1/16 \

@@ -1,18 +1,5 @@
-﻿# ----------------------------------------------------------------------------------
-#
-# Copyright Microsoft Corporation
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-# http://www.apache.org/licenses/LICENSE-2.0
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# ---------------------------------------------------------------------------------
-#
-# This script provided a simple solution to analyze and track the consolidated utilization of SQL Server licenses 
+﻿#
+# This script provides a simple solution to analyze and track the consolidated utilization of SQL Server licenses 
 # by all of the SQL resources in a specific subscription or the entire the account. By default, the script scans 
 # all subscriptions the user account has access. Alternatively, you can specify a single subscription or a .CSV file 
 # with a list of subscription. The usage report includes the following information for each scanned subscription.
@@ -31,12 +18,12 @@
 # The script accepts the following command line parameters:
 # 
 # -SubId [subscription_id] | [csv_file_name]        (Accepts a .csv file with the list of subscriptions)
-# -UseInRunbook [True] | [False]                    (Required when executed as a Runbook)
 # -Server [protocol:]server[instance_name][,port]   (Required to save data to the database)
 # -Database [database_name]                         (Required to save data to the database)
 # -Cred [credential_object]                         (Required to save data to the database)
 # -FilePath [csv_file_name]                         (Required to save data in a .csv format. Ignored if database parameters are specified)
-#
+# -UseInRunbook [True] | [False]                    (Required when executed as a Runbook)
+# -ShowUnregistered [True] | [False]                (Optional. If specified, checks every VM if SQL server is installed)
 # 
 
 param (
@@ -53,7 +40,10 @@ param (
     [Parameter (Mandatory= $false)]
     [bool] $UseInRunbook = $false, 
     [Parameter (Mandatory= $false)]
-    [bool] $ShowEC = $false
+    [bool] $ShowEC = $false,
+    [Parameter (Mandatory= $false)]
+    [bool] $ShowUnregistered = $false
+
 )
 
 function CheckModule ($m) {
@@ -84,7 +74,7 @@ function CheckModule ($m) {
 }
 
 function GetVCores {
-    # This function translates each VM or Host sku typo and name into vCores
+    # This function translates each VM or Host sku type and name into vCores
     
      [CmdletBinding()]
      param (
@@ -98,7 +88,7 @@ function GetVCores {
          $global:VM_SKUs = Get-AzComputeResourceSku  "westus" | where-object {$_.ResourceType -in 'virtualMachines','hostGroups/hosts'}
      }
      # Select first size and get the VCPus available
-     $size_info = $global:VM_SKUs | Where-Object {$_.ResourceType.Contains($type) -and $_.Name.Contains($name)} | Select-Object -First 1
+     $size_info = $global:VM_SKUs | Where-Object {$_.ResourceType.Contains($type) -and ($_.Name -eq $name)} | Select-Object -First 1
                          
      # Save the VCPU count
      switch ($type) {
@@ -114,7 +104,7 @@ function GetVCores {
      }      
  }
 function AddVCores {
-    # This function populets the $subtotal nubmers
+    # This function breaks down vCores into the $subtotal columns
     
     [CmdletBinding()]
     param (
@@ -180,9 +170,9 @@ function AddVCores {
     }   
 }
 
-function Discovery {
+function DiscoveryOnWindows {
     
-    # This function is to run on each VM to detect if SQL server is installed
+# This script checks if SQL Server is installed on Windows
     
     [bool] $SqlInstalled = $false 
     $regPath = 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server'
@@ -192,6 +182,19 @@ function Discovery {
     }
     Write-Output $SqlInstalled
 }
+
+#
+# This script checks if SQL Server is installed on Linux
+# 
+#    
+$DiscoveryOnLinux =
+    'if ! systemctl is-active --quiet mssql-server.service; then 
+    echo "False" 
+    exit 
+    else 
+        echo "True" 
+    fi'
+
 
 #The following block is required for runbooks only
 if ($UseInRunbook){
@@ -235,7 +238,8 @@ $GetVCoresDef = $function:GetVCores.ToString()
 $AddVCoresDef = $function:AddVCores.ToString()
 
 # Create a script file with the SQL server discovery logic
-New-Item  -ItemType file -path DiscoverSql.ps1 -value $function:Discovery.ToString() -Force | Out-Null
+New-Item  -ItemType file -path DiscoverSql.ps1 -value $function:DiscoveryOnWindows.ToString() -Force | Out-Null
+New-Item  -ItemType file -path DiscoverSql.sh -value $DiscoveryOnLinux -Force | Out-Null
 
 # Subscriptions to scan
 
@@ -250,7 +254,7 @@ if ($SubId -like "*.csv") {
 
 [bool] $useDatabase = $PSBoundParameters.ContainsKey("Server") -and $PSBoundParameters.ContainsKey("Cred") -and $PSBoundParameters.ContainsKey("Database")
 
-#Initialize tables and arrays
+# Initialize tables and arrays 
 
 if ($useDatabase){
     
@@ -349,66 +353,48 @@ foreach ($sub in $subscriptions){
     # Get all resource groups in the subscription
     $rgs = Get-AzResourceGroup
     
-    #Get all logical servers
+    # Get all logical servers
     $servers = Get-AzSqlServer 
 
-    #Scan all vCore-based SQL database resources in the subscription
+    # Scan all vCore-based SQL database resources in the subscription
     $servers | Get-AzSqlDatabase |  Where-Object { $_.SkuName -ne "ElasticPool" -and $_.Edition -in "GeneralPurpose", "BusinessCritical", "Hyperscale"} | Foreach-Object {
         AddVCores -Tier $_.Edition -LicenseType $_.LicenseType -CoreCount $_.Capacity
     }
     [system.gc]::Collect()
 
-    #Scan all vcOre-based SQL elastic pool resources in the subscription
+    # Scan all vcOre-based SQL elastic pool resources in the subscription
     $servers | Get-AzSqlElasticPool | Where-Object { $_.Edition -in "GeneralPurpose", "BusinessCritical", "Hyperscale"} | Foreach-Object {
         AddVCores -Tier $_.Edition -LicenseType $_.LicenseType -CoreCount $_.Capacity
     }
     [system.gc]::Collect()
 
-    #Scan all SQL managed instance resources in the subscription
+    # Scan all SQL managed instance resources in the subscription
     Get-AzSqlInstance | Where-Object { $_.InstancePoolName -eq $null} | Foreach-Object {
         AddVCores -Tier $_.Sku.Tier -LicenseType $_.LicenseType -CoreCount $_.VCores
     }
     [system.gc]::Collect()
      
-    #Scan all instance pool resources in the subscription
+    # Scan all instance pool resources in the subscription
     Get-AzSqlInstancePool | Foreach-Object {
         AddVCores -Tier $_.Edition -LicenseType $_.LicenseType -CoreCount $_.VCores
     }
     [system.gc]::Collect()
 
-    #Scan all SSIS imtegration runtime resources in the subscription
+    # Scan all SSIS imtegration runtime resources in the subscription
     $rgs | Get-AzDataFactoryV2 | Get-AzDataFactoryV2IntegrationRuntime |  Where-Object { $_.State -eq "Started" -and $_.Nodesize -ne $null } | Foreach-Object {
         $vCores = GetVCores -type "virtualMachines" -name $_.NodeSize
         AddVCores -Tier $_.Edition -LicenseType $_.LicenseType -CoreCount $vCores      
     }
     [system.gc]::Collect()
 
-    #Scan all VMs with SQL server installed using a parallel loop (up to 10 at a time). For that reason function AddVCores is not used 
-    #NOTE: ForEach-Object -Parallel is not supported in Runbooks (requires PS v7.1)
-    if ($UseInRunbook){
-        Get-AzVM -Status | Where-Object { $_.powerstate -eq 'VM running' } | ForEach-Object {
-            $vCores = GetVCores -type 'virtualMachines' -name $_.HardwareProfile.VmSize
-            $sql_vm = Get-AzSqlVm -ResourceGroupName $_.ResourceGroupName -Name $_.Name -ErrorAction Ignore
-            if ($sql_vm) {
-                AddVCores -Tier $sql_vm.Sku -LicenseType $sql_vm.LicenseType -CoreCount $vCores                
-            }
-            else {
-                try {
-                    $out = Invoke-AzVMRunCommand -ResourceGroupName $_.ResourceGroupName -Name $_.Name -CommandId 'RunPowerShellScript' -ScriptPath 'DiscoverSql.ps1' -ErrorAction Stop           
-                    if ($out.Value[0].Message -contains 'True'){                
-                        $subtotal.unreg_sqlvm += $vCores
-                    } 
-                }
-                catch {          
-                }
-            }
-        }
-    }
-    else {
-        Get-AzVM -Status | Where-Object { $_.powerstate -eq 'VM running' } | ForEach-Object -ThrottleLimit 10 -Parallel {
+    # Scan all VMs with SQL server installed using a parallel loop (up to 10 at a time). For that reason function AddVCores is not used 
+    # NOTE: ForEach-Object -Parallel is not supported in Runbooks (requires PS v7.1)
+    if ($PSVersionTable.PSVersion.Major -ge 7){
+        $vms = Get-AzVM -Status | Where-Object { $_.powerstate -eq 'VM running' } | ForEach-Object -ThrottleLimit 10 -Parallel {
             $function:GetVCores = $using:GetVCoresDef          
             $vCores = GetVCores -type 'virtualMachines' -name $_.HardwareProfile.VmSize
             $sql_vm = Get-AzSqlVm -ResourceGroupName $_.ResourceGroupName -Name $_.Name -ErrorAction Ignore
+            
             if ($sql_vm) {
                 switch ($sql_vm.Sku) {
                     "Enterprise" {
@@ -427,7 +413,7 @@ foreach ($sub in $subscriptions){
                             default {$($using:subtotal).payg_std += $vCores}
                         }
                     }
-                    "Developer" {
+                    "Developer" {                        
                         $($using:subtotal).developer += $vCores
                     }
                     "Express" {
@@ -436,16 +422,76 @@ foreach ($sub in $subscriptions){
                 }     
             }
             else {
-                try {
-                    $out = Invoke-AzVMRunCommand -ResourceGroupName $_.ResourceGroupName -Name $_.Name -CommandId 'RunPowerShellScript' -ScriptPath 'DiscoverSql.ps1' -ErrorAction Stop           
-                    if ($out.Value[0].Message -contains 'True'){                
-                        $($using:subtotal).unreg_sqlvm += $vCores
-                    } 
-                }
-                catch {          
+                if ($($using:ShowUnregistered)){
+                    if ($_.StorageProfile.OSDisk.OSType -eq "Windows"){            
+                        $params =@{
+                            ResourceGroupName = $_.ResourceGroupName
+                            Name = $_.Name
+                            CommandId = 'RunPowerShellScript'
+                            ScriptPath = 'DiscoverSql.ps1'
+                            ErrorAction = 'Stop'
+                        } 
+                    }
+                    else {
+                        $params =@{
+                            ResourceGroupName = $_.ResourceGroupName
+                            Name = $_.Name
+                            CommandId = 'RunShellScript'
+                            ScriptPath = 'DiscoverSql.sh'
+                            ErrorAction = 'Stop'
+                        }                       
+                    }
+                    try {                    
+                        $out = Invoke-AzVMRunCommand @params            
+                        if ($out.Value[0].Message.Contains('True')){                
+                            $($using:subtotal).unreg_sqlvm += $vCores            
+                        }                
+                    }
+                    catch {          
+                        write-host $params.Name "No acceaa"
+                    }
                 }
             }
-        }
+        }        
+    }
+    else {
+        Get-AzVM -Status | Where-Object { $_.powerstate -eq 'VM running' } | ForEach-Object {
+            $vCores = GetVCores -type 'virtualMachines' -name $_.HardwareProfile.VmSize
+            $sql_vm = Get-AzSqlVm -ResourceGroupName $_.ResourceGroupName -Name $_.Name -ErrorAction Ignore
+            if ($sql_vm) {
+                AddVCores -Tier $sql_vm.Sku -LicenseType $sql_vm.LicenseType -CoreCount $vCores                
+            }
+            else {
+                if ($ShowUnregistered){
+                    if ($_.StorageProfile.OSDisk.OSType -eq "Windows"){            
+                        $params =@{
+                            ResourceGroupName = $_.ResourceGroupName
+                            Name = $_.Name
+                            CommandId = 'RunPowerShellScript'
+                            ScriptPath = 'DiscoverSql.ps1'
+                            ErrorAction = 'Stop'
+                        } 
+                    }
+                    else {
+                        $params =@{
+                            ResourceGroupName = $_.ResourceGroupName
+                            Name = $_.Name
+                            CommandId = 'RunShellScript'
+                            ScriptPath = 'DiscoverSql.sh'
+                            ErrorAction = 'Stop'
+                        }                       
+                    }try {
+                        $out = Invoke-AzVMRunCommand @params            
+                        if ($out.Value[0].Message.Contains('True')){                
+                            $subtotal.unreg_sqlvm += $vCores            
+                        }
+                    }
+                    catch {          
+                        write-host $params.Name "No acceaa"
+                    }
+                }
+            }
+        }        
     }    
     [system.gc]::Collect()
 
